@@ -1,0 +1,1509 @@
+// DMCTermApp.cpp : 定义应用程序的入口点。
+//
+
+#include "stdafx.h"
+#include "DMCTermApp.h"
+#include <Objbase.h>
+#import  "Galil.tlb" 
+using namespace Galil;
+
+#define MAX_LOADSTRING 128
+
+// 全局变量: 
+HINSTANCE hInst;								// 当前实例
+TCHAR szTitle[MAX_LOADSTRING];					// 标题栏文本
+TCHAR szWindowClass[MAX_LOADSTRING];			// 主窗口类名
+TCHAR szPaintClass[MAX_LOADSTRING];            // 可绘图窗口
+TCHAR szLedClass[MAX_LOADSTRING] = TEXT("LedShow");  // 可绘图窗口
+TCHAR szInfClass[MAX_LOADSTRING] = TEXT("InfShow");  // 可绘图窗口
+TCHAR szFileName[MAX_PATH] = { 0 }, szTitleName[MAX_PATH] = { 0 };
+// 此代码模块中包含的函数的前向声明: 
+ATOM				MyRegisterClass(HINSTANCE hInstance);
+BOOL				InitInstance(HINSTANCE, int);
+LRESULT CALLBACK	WndProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK    PaintProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK    CmdProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK    InfProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK    LedProc(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK	About(HWND, UINT, WPARAM, LPARAM);
+
+INT_PTR CALLBACK	DMCInfoDlg(HWND, UINT, WPARAM, LPARAM);
+// Functions in POPFILE.C
+
+void PopFileInitialize(HWND);
+BOOL PopFileOpenDlg(HWND, PTSTR, PTSTR);
+BOOL PopFileSaveDlg(HWND, PTSTR, PTSTR);
+BOOL PopFileRead(HWND, PTSTR);
+BOOL PopFileWrite(HWND, PTSTR);
+void SetFilter(const TCHAR* szFilter);
+static LOGFONT logfont;
+static HFONT   hFont;
+void PopFontInitialize(HWND hwnd1, HWND hwnd2, HWND hwnd3)
+{
+	GetObject(GetStockObject(OEM_FIXED_FONT), sizeof(LOGFONT),
+		(PTSTR)&logfont);
+
+	hFont = CreateFontIndirect(&logfont);
+	SendMessage(hwnd1, WM_SETFONT, (WPARAM)hFont, 0);
+	SendMessage(hwnd2, WM_SETFONT, (WPARAM)hFont, 0);
+	SendMessage(hwnd3, WM_SETFONT, (WPARAM)hFont, 0);
+}
+BOOL PopFontChooseFont(HWND hwnd)
+{
+	CHOOSEFONT cf;
+
+	cf.lStructSize = sizeof(CHOOSEFONT);
+	cf.hwndOwner = hwnd;
+	cf.hDC = NULL;
+	cf.lpLogFont = &logfont;
+	cf.iPointSize = 0;
+	cf.Flags = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS | CF_EFFECTS;
+	cf.rgbColors = 0;
+	cf.lCustData = 0;
+	cf.lpfnHook = NULL;
+	cf.lpTemplateName = NULL;
+	cf.hInstance = NULL;
+	cf.lpszStyle = NULL;
+	cf.nFontType = 0;               // Returned from ChooseFont
+	cf.nSizeMin = 0;
+	cf.nSizeMax = 0;
+
+	return ChooseFont(&cf);
+}
+void PopFontSetFont(HWND hwndEdit)
+{
+	HFONT hFontNew;
+	RECT  rect;
+
+	hFontNew = CreateFontIndirect(&logfont);
+	SendMessage(hwndEdit, WM_SETFONT, (WPARAM)hFontNew, 0);
+	DeleteObject(hFont);
+	hFont = hFontNew;
+	GetClientRect(hwndEdit, &rect);
+	InvalidateRect(hwndEdit, &rect, TRUE);
+}
+void PopFontDeinitialize(void)
+{
+	DeleteObject(hFont);
+}
+//窗口资源
+static HWND hmodel = NULL;
+static int  cxScreen, cyScreen;
+#define pn_id 118
+#define ed_id 116
+#define bn_id 0
+#define ss_id 112
+
+//DMC
+HRESULT hr;
+IGalil *pIGalil = NULL;
+Events *pEvents = NULL;
+struct DMCPARAM
+{
+	BOOL blink;
+}dmc_param;
+int _OpenFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave);
+int _DownLoadFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave);
+int _UpLoadFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave);
+int _DownloadExcute(TCHAR* szSend, HWND hmsg);
+int _SendDMC(TCHAR* szSend, HWND hmsg);
+
+
+static DLG_DATA_DMC_INFO  dlgdata_dmcinfo;
+///
+
+#define nButton 9
+TCHAR* pszPush[2][nButton] = { \
+  { TEXT("打 开"), TEXT("刷 新"), TEXT("启 动"), TEXT("回 零"), TEXT("复 位"), TEXT("停 止"), TEXT("设 置"), TEXT("手 控"), TEXT("发 送") }\
+, { TEXT("上传dmc"), TEXT("下载dmc"), TEXT("上传执行"), TEXT("清 零"), TEXT("仿 真"), TEXT("管理员"), TEXT("DMC参数"), TEXT("读取DMC"), TEXT("链 接") } };
+WNDPROC CallProc[2][nButton];
+int idFocus;
+
+void WindowOK(HWND hwnd, TCHAR * szMessage, TCHAR * szTitleName)
+{
+	static TCHAR szBuffer[64 + MAX_PATH];
+	_stprintf_s(szBuffer, 64 + MAX_PATH, szMessage, szTitleName[0] ? szTitleName : TEXT("(untitled)"));
+	MessageBox(hwnd, szBuffer, szTitle, MB_OK | MB_ICONEXCLAMATION);
+}
+
+short AskAboutSave(HWND hwnd, TCHAR * szTitleName)
+{
+	TCHAR szBuffer[64 + MAX_PATH];
+	int   iReturn;
+
+	wsprintf(szBuffer, TEXT("程序【%s】中文本发生变化是否保存?"),
+		szTitleName[0] ? szTitleName : TEXT("(UNTITLED)"));
+
+	iReturn = MessageBox(hwnd, szBuffer, szTitle,
+		MB_YESNOCANCEL | MB_ICONQUESTION);
+
+	if (iReturn == IDYES)
+		if (!SendMessage(hwnd, WM_COMMAND, IDM_FILE_SAVE, 0))
+			iReturn = IDCANCEL;
+
+	return iReturn;
+}
+void DoCaption(HWND hwnd, TCHAR * szTitleName)
+{
+	TCHAR szCaption[64 + MAX_PATH];
+
+	wsprintf(szCaption, TEXT("%s - %s"), szTitle,
+		szTitleName[0] ? szTitleName : TEXT("(UNTITLED)"));
+
+	SetWindowText(hwnd, szCaption);
+}
+int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
+                     _In_opt_ HINSTANCE hPrevInstance,
+                     _In_ LPTSTR    lpCmdLine,
+                     _In_ int       nCmdShow)
+{
+	UNREFERENCED_PARAMETER(hPrevInstance);
+	UNREFERENCED_PARAMETER(lpCmdLine);
+
+ 	// TODO:  在此放置代码。
+	MSG msg;
+	HACCEL haccel;
+	CLSID clsid;
+
+	// 初始化全局字符串
+	LoadString(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
+	LoadString(hInstance, IDC_DMCTERMAPP, szWindowClass, MAX_LOADSTRING);
+	LoadString(hInstance, IDS_WIN_PAINT, szPaintClass, MAX_LOADSTRING);
+
+	MyRegisterClass(hInstance);
+   
+	cxScreen = GetSystemMetrics(SM_CXSCREEN);
+	cyScreen = GetSystemMetrics(SM_CYSCREEN);
+	// 执行应用程序初始化: 
+	if (!InitInstance (hInstance, nCmdShow))
+	{
+		return FALSE;
+	}
+
+	hr = CoInitialize(NULL);
+	if (FAILED(hr))
+	{
+		return FALSE;
+	}
+	hr = CLSIDFromProgID(OLESTR("Galil"), &clsid);
+	if (FAILED(hr))
+	{
+		MessageBox(NULL, TEXT("加载Galil组件失败！"), TEXT("错误"), MB_ICONERROR);
+		return FALSE;
+	}
+	hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, _uuidof(IGalil), (void**)&pIGalil);
+	if (FAILED(hr) || pIGalil == NULL )
+	{
+		MessageBox(NULL, TEXT("实例化Galil组件失败！"), TEXT("错误"), MB_ICONERROR);
+		return FALSE;
+	}
+	//hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, _uuidof(Events), (void**)&pEvents);
+	//if (FAILED(hr) || pEvents == NULL)
+	//{
+	//	MessageBox(NULL, TEXT("实例化Galil组件失败！"), TEXT("错误"), MB_ICONERROR);
+	//	pEvents = NULL;
+	//	return FALSE;
+	//}
+	memset(&dmc_param, sizeof(struct DMCPARAM),0x00);
+	TCHAR szBuffer[128] = { 0 };
+	lstrcat(szBuffer, TEXT("初始化组件成功，版本"));
+	lstrcat(szBuffer, TEXT(" [") + pIGalil->libraryVersion() + TEXT("]") );
+	WindowOK(NULL, szBuffer, TEXT("成功"));
+
+	haccel = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_DMCTERMAPP));
+	// 主消息循环: 
+	while (GetMessage(&msg, NULL, 0, 0))
+	{
+		if (hmodel == NULL || !IsDialogMessage(hmodel, &msg))
+		{
+			if (!TranslateAccelerator(msg.hwnd, haccel, &msg))
+			{
+				TranslateMessage(&msg);
+				DispatchMessage(&msg);
+			}
+		}
+	}
+
+	if ( pIGalil != NULL)
+	{
+		pIGalil->Release();
+	}
+	CoUninitialize();
+	return (int) msg.wParam;
+}
+
+
+
+//
+//  函数:  MyRegisterClass()
+//
+//  目的:  注册窗口类。
+//
+ATOM MyRegisterClass(HINSTANCE hInstance)
+{
+	WNDCLASSEX wcex;
+
+	wcex.cbSize = sizeof(WNDCLASSEX);
+
+	wcex.style			= CS_HREDRAW | CS_VREDRAW;
+	wcex.lpfnWndProc	= WndProc;
+	wcex.cbClsExtra		= 0;
+	wcex.cbWndExtra		= 0;
+	wcex.hInstance		= hInstance;
+	wcex.hIcon			= LoadIcon(hInstance, MAKEINTRESOURCE(IDI_DMCTERMAPP));
+	wcex.hCursor		= LoadCursor(NULL, IDC_ARROW);
+	wcex.hbrBackground = (HBRUSH)(COLOR_BTNHIGHLIGHT + 1);
+	wcex.lpszMenuName	= MAKEINTRESOURCE(IDC_DMCTERMAPP);
+	wcex.lpszClassName	= szWindowClass;
+	wcex.hIconSm		= LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
+	RegisterClassEx(&wcex);
+
+	wcex.lpfnWndProc = LedProc;
+	wcex.style = NULL;
+	wcex.hbrBackground = (HBRUSH)(COLOR_BTNHIGHLIGHT + 1);
+	wcex.lpszMenuName = NULL;
+	wcex.lpszClassName = szLedClass;
+	RegisterClassEx(&wcex);
+
+	wcex.lpfnWndProc = InfProc;
+	wcex.style = NULL;
+	wcex.hbrBackground = (HBRUSH)(COLOR_BTNHIGHLIGHT + 1);
+	wcex.lpszMenuName = NULL;
+	wcex.lpszClassName = szInfClass;
+	RegisterClassEx(&wcex);
+
+	wcex.lpfnWndProc = PaintProc;
+	wcex.style = NULL;
+	wcex.hCursor = LoadCursor(NULL, IDC_CROSS);
+	wcex.hbrBackground = (HBRUSH)(COLOR_BTNHIGHLIGHT + 1);
+	wcex.lpszMenuName = NULL;
+	wcex.lpszClassName = szPaintClass;
+
+
+	return RegisterClassEx(&wcex);
+}
+static HWND hdxf, hcmd, hmsg, hbutton[2][nButton], hbox, hinf, hled, hstu;
+//
+//   函数:  InitInstance(HINSTANCE, int)
+//
+//   目的:  保存实例句柄并创建主窗口
+//
+//   注释: 
+//
+//        在此函数中，我们在全局变量中保存实例句柄并
+//        创建和显示主程序窗口。
+//
+BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
+{
+   HWND hWnd;
+
+   hInst = hInstance; // 将实例句柄存储在全局变量中
+
+   int cx = cxScreen *22 /24;
+   int cy = cyScreen *22 /24;
+
+   hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW | WS_TABSTOP,
+	   cxScreen / 24, cyScreen / 24, cx, cy, NULL, NULL, hInstance, NULL);
+
+   if (!hWnd)
+   {
+      return FALSE;
+   }
+   ShowWindow(hWnd, nCmdShow);
+   UpdateWindow(hWnd);
+
+   return TRUE;
+}
+int iMsgIndex = 1;
+void Edit_SetLineText(HWND hwnd, const LPTSTR lpText)
+{
+	const int iLast = 28193;
+	static TCHAR EditTextBuffer[28196] = { 0 };
+	static int iTextLen = 0;
+	if (iMsgIndex == 0) iTextLen = 0;
+	EditTextBuffer[iTextLen] = L'\0';
+
+	int iTextCat, iMaxLeng;
+
+	iTextCat = lstrlen(lpText);
+	iMaxLeng = iTextCat;
+	if (iTextLen + iMaxLeng > iLast)
+	{
+		iMaxLeng = iLast - iMaxLeng;
+	}
+	iTextLen += iMaxLeng;
+
+	LPTSTR lpWrite = EditTextBuffer + (iLast - iTextLen);
+	memcpy_s(lpWrite, iLast - iTextLen, lpText, iMaxLeng);
+
+	TCHAR TextCat[64] = { 0 };
+	TCHAR IMsgIdx[16] = { 0 };
+
+	lstrcat(TextCat, TEXT("【"));
+	_itot_s(iMsgIndex, IMsgIdx, 16, 10);
+	lstrcat(TextCat, IMsgIdx);
+	lstrcat(TextCat, TEXT("】"));
+	iTextCat = lstrlen(TextCat);
+	++iMsgIndex;
+
+
+	iMaxLeng = iTextCat;
+	if (iTextLen + iMaxLeng > iLast)
+	{
+		iMaxLeng = iLast - iMaxLeng;
+	}
+	iTextLen += iMaxLeng;
+	lpWrite = EditTextBuffer + (iLast - iTextLen);
+	memcpy_s(lpWrite, iLast - iTextLen, TextCat, iMaxLeng);
+
+	//SetWindowFont(hwnd, GetStockObject(SYSTEM_FIXED_FONT), FALSE);
+	Edit_SetText(hwnd, lpWrite);
+}
+//
+//  函数:  WndProc(HWND, UINT, WPARAM, LPARAM)
+//
+//  目的:    处理主窗口的消息。
+//
+//  WM_COMMAND	- 处理应用程序菜单
+//  WM_PAINT	- 绘制主窗口
+//  WM_DESTROY	- 发送退出消息并返回
+//
+//
+
+
+HPEN hpline;//dot
+static TCHAR szbuffer[3][5][64] = { 0 };
+static const TCHAR* pbuffer[3][5] = { 0 };
+static const TCHAR* szInfo[3][5] =
+{
+	{ TEXT(""), TEXT(""/*1-2*/), TEXT(""/*1-3*/), TEXT(""/*1-4*/), TEXT(""/*1-5*/) },
+	{ TEXT(""), TEXT("下刀压力："/*2-2*/), TEXT("下刀延迟："/*2-3*/), TEXT("玻璃厚度："/*2-4*/), TEXT(""/*2-5*/) },
+	{ TEXT(""), TEXT(""/*3-2*/), TEXT(""/*3-3*/), TEXT(""/*3-4*/), TEXT(""/*3-5*/) }
+};
+static const TCHAR* szInput[3][5] =
+{
+	{ TEXT(""), TEXT(""/*1-2*/), TEXT(""/*1-3*/), TEXT(""/*1-4*/), TEXT(""/*1-5*/) },
+	{ TEXT("IN[1]："), TEXT("IN[3]："/*2-2*/), TEXT("IN[5]："/*2-3*/), TEXT("IN[7]："/*2-4*/), TEXT(""/*2-5*/) },
+	{ TEXT("IN[2]："), TEXT("IN[4]："/*3-2*/), TEXT("IN[6]："/*3-3*/), TEXT("IN[8]："/*3-4*/), TEXT(""/*3-5*/) }
+};
+static const TCHAR* (*pszInfo)[5] = NULL;
+
+const UINT idTimer1 = 1;
+UINT nTimerDelay = 300;
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	int wmId, wmEvent;
+	static HINSTANCE hInstance;
+	PAINTSTRUCT ps;
+	HDC hdc;
+	static POINT pt0,pt1,pt2,pt3,pt4;
+	static int  i, cx,cy,cxClient, cyClient,j;
+	static BOOL bsave = FALSE;
+	static HMENU hmenu;
+	static int id = 0;
+
+	switch (message)
+	{
+	case WM_SETFOCUS:
+	  id = 0;
+	break;
+	case WM_KEYDOWN:
+		if (wParam == VK_TAB)//	int id = GetWindowLong(hwnd, GWL_ID);
+		{
+			switch (id)
+			{
+			  case 0:SetFocus(GetDlgItem(hwnd, idFocus)); break;
+			}
+		}
+
+		break;
+
+	case WM_INITMENUPOPUP:
+		switch (lParam)
+		{
+		case 0:
+			EnableMenuItem((HMENU)wParam, IDM_FILE_SAVE, bsave ? MF_ENABLED : MF_GRAYED);
+			EnableMenuItem((HMENU)wParam, IDM_FILE_SAVE_AS, bsave ? MF_ENABLED : MF_GRAYED);
+
+			break;
+		case 1:
+			EnableMenuItem((HMENU)wParam, IDM_OPT_LINK, !dmc_param.blink ? MF_ENABLED : MF_GRAYED);
+			EnableMenuItem((HMENU)wParam, IDM_OPT_START, dmc_param.blink ? MF_ENABLED : MF_GRAYED);
+			break;
+		}
+		break;
+	case WM_CREATE:
+		hInstance = ((LPCREATESTRUCT)lParam)->hInstance;
+		hdxf = CreateWindow(szPaintClass, NULL, WS_CHILD | WS_VISIBLE | SS_SIMPLE | WS_BORDER, 0, 0, 0, 0, hwnd, (HMENU)pn_id, hInstance, NULL);
+		hled = CreateWindow(szLedClass, NULL, WS_CHILD | WS_VISIBLE | SS_SIMPLE | WS_BORDER, 0, 0, 0, 0, hwnd, (HMENU)(pn_id + 1), hInstance, NULL);
+		hinf = CreateWindow(szInfClass, NULL, WS_CHILD | WS_VISIBLE | WS_BORDER, 0, 0, 0, 0, hwnd, (HMENU)(ss_id), hInstance, NULL);
+
+		hcmd = CreateWindow(TEXT("edit"), NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOHSCROLL | ES_AUTOVSCROLL | WS_TABSTOP | ES_UPPERCASE | ES_WANTRETURN, 0, 0, 0, 0, hwnd, (HMENU)(ed_id), hInstance, NULL);
+		hmsg = CreateWindow(TEXT("edit"), NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, 0, 0, 0, 0, hwnd, (HMENU)(ed_id + 1), hInstance, NULL);
+
+		hstu = CreateWindow(TEXT("static"), NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | SS_LEFT , 0, 0, 0, 0, hwnd, (HMENU)(ss_id + 1), hInstance, NULL);
+
+		for (i = 0; i < nButton; ++i)
+		{
+			for (j = 0; j < 2; ++j)
+			{
+				hbutton[j][i] = CreateWindow(TEXT("button"), pszPush[j][i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT, 0, 0, 0, 0, hwnd, (HMENU)(bn_id + i*2 + j), hInstance, NULL);
+				CallProc[j][i] = (WNDPROC)SetWindowLong(hbutton[j][i], GWL_WNDPROC, (LONG)CmdProc);
+			}
+		}
+		iMsgIndex = 1;
+
+		hpline = ::CreatePen(PS_DOT, NULL, RGB(130, 130, 130));
+
+		SendMessage(hcmd, EM_LIMITTEXT, 32000, 0L);
+		SendMessage(hmsg, EM_LIMITTEXT, 32000, 0L);
+
+		PopFileInitialize(hwnd);//PopFontChooseFont(hwnd);
+
+		hmenu = GetSystemMenu(hwnd, FALSE);
+
+		if (hmenu)
+		{
+			if (AppendMenu(hmenu, MF_SEPARATOR, 0, NULL))
+			{
+				AppendMenu(hmenu, MF_STRING, IDM_FONT, TEXT("选择字体..."));
+			}
+		}
+
+		PopFontInitialize(hcmd,hstu,hmsg); 
+
+		{
+			int i, j, k;
+			for (k = i = 0; i < 5; ++i, k)
+			{
+				for (j = 0; j < 3; ++j)
+				{
+					pbuffer[j][i] = szbuffer[j][i];
+				}
+			}
+		}
+
+		break;
+	case WM_TIMER:
+#ifdef _DEBUG
+		//Edit_SetLineText(hmsg, TEXT("command."));
+#else
+		if (dmc_param.blink && pEvents != NULL)
+		{
+			pEvents->onMessage(_bstr_t(TEXT("Message")));
+	    }
+#endif
+		break;
+	case WM_SYSCOMMAND:
+		wmId = LOWORD(wParam);
+		switch (wmId)
+		{
+		case IDM_FONT:
+			if (PopFontChooseFont(hwnd))
+				PopFontSetFont(hcmd);
+			break;
+		default:
+			return DefWindowProc(hwnd, message, wParam, lParam);
+		}
+		break;
+	case WM_COMMAND:
+		wmId    = LOWORD(wParam);
+		wmEvent = HIWORD(wParam);
+		if (lParam && wmId == ed_id)
+		{
+			switch (wmEvent)
+			{
+			case EN_UPDATE:bsave = true; break;
+			case EN_ERRSPACE:case EN_MAXTEXT:
+				MessageBox(hwnd, TEXT("Edit control out of space."),
+					szTitle, MB_OK | MB_ICONSTOP); break;
+			}
+			break;
+		}
+		// 分析菜单选择: 
+		if (wmId >= bn_id && wmId < bn_id + nButton * 2)
+		{
+			Edit_SetLineText(hmsg, pszPush[(idFocus - bn_id) % 2][(idFocus - bn_id) / 2]);
+		}
+		switch (wmId)
+		{
+		case IDM_ABOUT:
+			DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, About);
+
+			{TCHAR buf[23] = { 0 };
+			_stprintf_s(buf, 20, TEXT("%d"), id);
+			WindowOK(hwnd, buf, TEXT(""));
+			}
+			break;
+		case IDM_EXIT:
+			if (IDYES == MessageBox(hwnd, TEXT(" 您确定要退出程序吗？"), szTitle,
+				MB_YESNO | MB_ICONQUESTION))
+			{
+				DestroyWindow(hwnd);
+			}
+			break;
+		case bn_id:
+			_OpenFile(hwnd, hcmd,hstu, bsave);
+			break;
+		case bn_id + 1:
+#ifdef _DEBUG 
+			
+			Edit_SetLineText(hmsg, TEXT("command."));
+#else
+			if (dmc_param.blink && pIGalil != NULL)
+			{
+				_DownLoadFile(hwnd, hcmd, hstu, bsave);
+			}
+#endif
+
+			break;
+		case bn_id + 3:
+#ifdef _DEBUG 
+
+			//Edit_SetLineText(hmsg, TEXT("command."));
+#else
+			if (dmc_param.blink && pIGalil != NULL)
+			{
+				_DownLoadFile(hwnd, hcmd, hstu, bsave);
+			}
+#endif
+
+			break;
+		case bn_id+2*2 + 0:
+			Edit_SetLineText(hmsg, pszPush[(idFocus - bn_id) % 2][(idFocus - bn_id) / 2]);
+#ifdef _DEBUG
+
+#else
+			if (dmc_param.blink && pIGalil != NULL)
+#endif
+			{
+#ifdef _DEBUG
+				_stprintf_s(szbuffer[1][0], 63, TEXT("%s%d"), szInput[1][0], 0);
+				_stprintf_s(szbuffer[1][1], 63, TEXT("%s%d"), szInput[1][1], 1);
+				_stprintf_s(szbuffer[1][2], 63, TEXT("%s%d"), szInput[1][2], 2);
+				_stprintf_s(szbuffer[1][3], 63, TEXT("%s%d"), szInput[1][3], 3);
+
+				_stprintf_s(szbuffer[2][0], 63, TEXT("%s%d"), szInput[2][0], 0);
+				_stprintf_s(szbuffer[2][1], 63, TEXT("%s%d"), szInput[2][1], 1);
+				_stprintf_s(szbuffer[2][2], 63, TEXT("%s%d"), szInput[2][2], 2);
+				_stprintf_s(szbuffer[2][3], 63, TEXT("%s%d"), szInput[2][3], 3);
+#else
+				_stprintf_s(szbuffer[1][0], 63, TEXT("%s%s"), szInput[1][0], pIGalil->command(_bstr_t(TEXT("MG@IN[1]")), TEXT("\r"), TEXT(":"),TRUE));
+				_stprintf_s(szbuffer[1][1], 63, TEXT("%s%s"), szInput[1][1], pIGalil->command(_bstr_t(TEXT("MG@IN[3]")), TEXT("\r"), TEXT(":"), TRUE));
+				_stprintf_s(szbuffer[1][2], 63, TEXT("%s%s"), szInput[1][2], pIGalil->command(_bstr_t(TEXT("MG@IN[5]")), TEXT("\r"), TEXT(":"), TRUE));
+				_stprintf_s(szbuffer[1][3], 63, TEXT("%s%s"), szInput[1][3], pIGalil->command(_bstr_t(TEXT("MG@IN[7]")), TEXT("\r"), TEXT(":"), TRUE));
+
+				_stprintf_s(szbuffer[2][0], 63, TEXT("%s%s"), szInput[2][0], pIGalil->command(_bstr_t(TEXT("MG@IN[2]")), TEXT("\r"), TEXT(":"), TRUE));
+				_stprintf_s(szbuffer[2][1], 63, TEXT("%s%s"), szInput[2][1], pIGalil->command(_bstr_t(TEXT("MG@IN[4]")), TEXT("\r"), TEXT(":"), TRUE));
+				_stprintf_s(szbuffer[2][2], 63, TEXT("%s%s"), szInput[2][2], pIGalil->command(_bstr_t(TEXT("MG@IN[6]")), TEXT("\r"), TEXT(":"), TRUE));
+				_stprintf_s(szbuffer[2][3], 63, TEXT("%s%s"), szInput[2][3], pIGalil->command(_bstr_t(TEXT("MG@IN[8]")), TEXT("\r"), TEXT(":"), TRUE));
+
+#endif
+				pszInfo = pbuffer;
+				InvalidateRect(hinf, NULL, TRUE);
+			}
+			break;
+		case bn_id + 2 * 2 + 1:
+			Edit_SetLineText(hmsg, pszPush[(idFocus - bn_id) % 2][(idFocus - bn_id) / 2]);
+#ifdef _DEBUG
+
+#else
+			if (dmc_param.blink && pIGalil != NULL)
+#endif
+			{
+#ifdef _DEBUG
+				 
+#else
+				int    iLength;
+				PTSTR  pstrBuffer;
+				iLength = GetWindowTextLength(hcmd);
+				pstrBuffer = (PTSTR)malloc((iLength + 1) * sizeof(TCHAR));
+				if (pstrBuffer)
+				{
+					GetWindowText(hcmd, pstrBuffer, iLength + 1);
+					_DownloadExcute(pstrBuffer, hmsg);
+					free(pstrBuffer);
+				}
+#endif
+			}
+			break;
+		case IDM_FILE_OPEN:Edit_SetLineText(hmsg, TEXT("IDM_FILE_OPEN"));
+			_OpenFile(hwnd, hcmd, hstu,bsave);
+			break;
+		case IDM_FILE_SAVE:Edit_SetLineText(hmsg, TEXT("IDM_FILE_SAVE"));
+			if (szFileName[0])
+			{
+				if (PopFileWrite(hcmd, szFileName))
+				{
+					bsave = FALSE;
+				}
+				else
+				{
+					WindowOK(hwnd, TEXT("写文件发生错误： %s"),szTitleName);
+				}
+			}
+			break;
+		case IDM_FILE_SAVE_AS:Edit_SetLineText(hmsg, TEXT("IDM_FILE_SAVE_AS"));
+			if (PopFileSaveDlg(hwnd, szFileName, szTitleName))
+			{
+				DoCaption(hwnd, szTitleName);
+				if (PopFileWrite(hcmd, szFileName))
+				{
+					bsave = FALSE;
+				}
+				else
+				{
+					WindowOK(hwnd, TEXT("写文件发生错误： %s"),szTitleName);
+				}
+			}
+			break;
+		case bn_id + 7*2 +1://读取DMC
+			hInstance = (HINSTANCE)GetWindowLong(hwnd, GWL_HINSTANCE);
+			hmodel = CreateDialogParam(hInstance, MAKEINTRESOURCE(IDD_DMC_INFO), hwnd, DMCInfoDlg,(LPARAM)(&dlgdata_dmcinfo));
+			break;
+		case bn_id + 8 * 2 + 1:Edit_SetLineText(hmsg, pszPush[(idFocus - bn_id) % 2][(idFocus - bn_id) / 2]);
+		case IDM_OPT_LINK:Edit_SetLineText(hmsg, TEXT("IDM_OPT_START"));
+			if (pIGalil != NULL)
+			{//pIGalil->address = _bstr_t(TEXT(""));
+				if ( FAILED( hr = pIGalil->put_address(_bstr_t(TEXT(""))) ) )
+				{ 
+					Edit_SetLineText(hmsg, TEXT("未建立连接."));
+				}
+				else
+				{
+					dmc_param.blink = TRUE;
+					Edit_SetLineText(hmsg, pIGalil->connection());
+				}
+			}
+			break;
+
+		case IDM_OPT_START:Edit_SetLineText(hmsg, TEXT("IDM_FILE_OPEN"));
+			break;
+		case IDM_OPT_STOP:Edit_SetLineText(hmsg, TEXT("IDM_OPT_STOP"));
+			break;
+		case IDM_OPT_ZERO:Edit_SetLineText(hmsg, TEXT("IDM_OPT_ZERO"));
+			break;
+		case IDM_OPT_RESET:Edit_SetLineText(hmsg, TEXT("IDM_OPT_RESET"));
+			break;
+		case bn_id + 8 * 2 + 0:Edit_SetLineText(hmsg, pszPush[(idFocus - bn_id) % 2][(idFocus - bn_id) / 2]);
+		case IDM_OPT_SEND:Edit_SetLineText(hmsg, TEXT("IDM_OPT_SEND"));
+#ifdef _DEBUG
+
+#else
+			if (dmc_param.blink && pIGalil != NULL)
+#endif
+			{
+				int    iLength;
+				PTSTR  pstrBuffer;
+				iLength = GetWindowTextLength(hcmd);
+				pstrBuffer = (PTSTR)malloc((iLength + 1) * sizeof(TCHAR));
+				if (pstrBuffer)
+				{
+					GetWindowText(hcmd, pstrBuffer, iLength + 1);
+					_SendDMC(pstrBuffer, hmsg);
+					free(pstrBuffer);
+				}
+			}
+			break;
+		case IDM_OPT_MANUAL:Edit_SetLineText(hmsg, TEXT("IDM_OPT_MANUAL"));
+			break;
+		case IDM_SET_BELT:Edit_SetLineText(hmsg, TEXT("IDM_SET_BELT"));
+			break;
+		case IDM_SET_PARAMETER:Edit_SetLineText(hmsg, TEXT("IDM_SET_PARAMETER"));
+			break;
+		case IDM_SET_ADMIN:Edit_SetLineText(hmsg, TEXT("IDM_SET_ADMIN"));
+			break;
+		default:
+			return DefWindowProc(hwnd, message, wParam, lParam);
+		}
+		break;
+	case WM_SIZE:
+		cxClient = LOWORD(lParam);
+		cyClient = HIWORD(lParam);
+		pt0.x = cxClient * 3 / 4;
+		pt0.y = cyClient * 3 / 4;
+		pt1.x = max(0,cxClient - 1) ;
+		pt1.y = max(0,cyClient - 1) ;
+
+
+		pt2.x = pt0.x;
+
+		MoveWindow(hdxf, 1, 0, max(0, pt2.x - 1), pt0.y - 0, TRUE);
+		pt0.x += 1;
+		MoveWindow(hcmd, pt0.x, 0, pt1.x - pt0.x, pt0.y-0, TRUE);
+		pt0.y += 1;
+		MoveWindow(hmsg, pt0.x, pt0.y, pt1.x - pt0.x, pt1.y - pt0.y, TRUE);
+		
+		pt2.y = max(0, pt1.y - pt0.y) /7 + pt0.y;
+		MoveWindow(hled, 1, pt0.y, max(0, pt2.x - 1), pt2.y - pt0.y, TRUE);
+		pt2.y += 1;
+		pt3.y = max(0, pt1.y - pt2.y) * 5/10 + pt2.y;
+		MoveWindow(hinf, 1, pt2.y, max(0,pt2.x - 1), pt3.y - pt2.y, TRUE);
+		pt3.y += 1;
+		pt4.y = max(0, pt1.y - pt3.y) * 6/8 + pt3.y;
+        
+		cy = max(0,pt4.y - pt3.y-1);
+		cy /= 2;
+
+		cx = (pt0.x - 1) / nButton - 1;
+		for (j = 0; j < 2; ++j)
+		{
+			for (i = 0; i < nButton; ++i)
+			{
+				MoveWindow(hbutton[j][i], (cx + 1)*i + 1, pt3.y + (j?cy+1:0), (nButton == i + 1) ? (max(0, pt2.x - (cx + 1)*i - 1)) : cx, cy, TRUE);
+			}
+		}
+		pt4.y += 1;
+		MoveWindow(hstu,1, pt4.y, max(0,pt2.x - 1), pt1.y - pt4.y, TRUE);
+
+		break;
+	case WM_PAINT:
+		hdc = BeginPaint(hwnd, &ps);
+		// TODO:  在此添加任意绘图代码...
+		//MoveToEx(hdc, 0, pt4.y, NULL); LineTo(hdc, pt0.x, pt4.y);
+		EndPaint(hwnd, &ps);
+		break;
+	case WM_CTLCOLORBTN:
+		i = GetWindowLong((HWND)lParam, GWL_ID);
+		if (i >= bn_id && i < bn_id+nButton*2)    // static text controls
+		{
+			SelectObject((HDC)wParam, GetStockObject(SYSTEM_FIXED_FONT));
+		}
+		break;
+	case OCM_CTLCOLORSTATIC:
+		i = GetWindowLong((HWND)lParam, GWL_ID);
+		if (ss_id + 1 == i)
+		{
+			SelectObject((HDC)wParam, GetStockObject(SYSTEM_FIXED_FONT));
+		}
+		break;
+	case WM_CTLCOLOREDIT:
+		i = GetWindowLong((HWND)lParam, GWL_ID);
+		if (i == ed_id+1)
+		{
+			//SelectObject((HDC)wParam, GetStockObject(SYSTEM_FIXED_FONT));
+		}
+		break;
+	case WM_DESTROY:
+		if (pIGalil != NULL&&dmc_param.blink)
+		{
+			if (FAILED(hr = pIGalil->put_address(_bstr_t(TEXT("OFFLINE")))))
+			{
+				Edit_SetLineText(hmsg, TEXT("已关闭连接."));
+			}
+			else
+			{
+				dmc_param.blink = FALSE;
+			}
+		}
+		DeleteObject(hpline);
+		PopFontDeinitialize();
+		PostQuitMessage(0);
+		break;
+	case WM_CLOSE:
+		DestroyWindow(hwnd);
+		break;
+	default:
+		return DefWindowProc(hwnd, message, wParam, lParam);
+	}
+	return 0;
+}
+void DrawRuler(HDC hdc, RECT * prc)
+{
+	static int iRuleSize[16] = { 360, 72, 144, 72, 216, 72, 144, 72,
+		288, 72, 144, 72, 216, 72, 144, 72 };
+	int        i, j;
+	POINT      ptClient;
+
+	SaveDC(hdc);
+
+	// Set Logical Twips mapping mode
+
+	SetMapMode(hdc, MM_ANISOTROPIC);
+	SetWindowExtEx(hdc, 1440, 1440, NULL);
+	SetViewportExtEx(hdc, GetDeviceCaps(hdc, LOGPIXELSX), GetDeviceCaps(hdc, LOGPIXELSY), NULL);
+
+	// Move the origin to a half inch from upper left
+
+	SetWindowOrgEx(hdc, -720, -720, NULL);
+
+	// Find the right margin (quarter inch from right)
+
+	ptClient.x = prc->right;
+	ptClient.y = prc->bottom;
+	DPtoLP(hdc, &ptClient, 1);
+	//ptClient.x -= 360;
+	// Draw the rulers
+
+	MoveToEx(hdc, 0, -360, NULL);
+	LineTo(hdc, ptClient.x, -360);
+	MoveToEx(hdc, -360, 0, NULL);
+	LineTo(hdc, -360, ptClient.y);
+
+
+
+	for (i = 0, j = 0; i <= ptClient.x; i += 90/*=(1440 / 16)*/, j++)
+	{
+		MoveToEx(hdc, i, -360, NULL);
+		LineTo(hdc, i, -360 - iRuleSize[j % 16]);
+	}
+
+	for (i = 0, j = 0; i <= ptClient.y; i += 90/*=(1440 / 16)*/, j++)
+	{
+		MoveToEx(hdc, -360, i, NULL);
+		LineTo(hdc, -360 - iRuleSize[j % 16], i);
+	}
+	SelectObject(hdc, hpline);
+	for (i = 0, j = 0; i <= ptClient.x; i += 360, j++)
+	{
+
+		MoveToEx(hdc, i, 0, NULL);
+		LineTo(hdc, i, ptClient.y);
+	}
+
+	for (i = 0, j = 0; i <= ptClient.y; i += 360, j++)
+	{
+		MoveToEx(hdc, 0, i, NULL);
+		LineTo(hdc, ptClient.x, i);
+	}
+
+	RestoreDC(hdc, -1);
+}
+//
+LRESULT CALLBACK PaintProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam)
+{
+	static RECT   rect;
+	PAINTSTRUCT ps;
+	HDC hdc;
+	int cxClient, cyClient;
+	switch (Message)
+	{
+	case WM_TIMER:
+		
+		break;
+	case WM_SIZE:
+		cxClient = LOWORD(lParam);
+		cyClient = HIWORD(lParam);
+		break;
+	case WM_PAINT:
+		hdc = BeginPaint(hwnd, &ps);
+
+		GetClientRect(hwnd, &rect);
+		DrawRuler(hdc, &rect);
+
+		EndPaint(hwnd, &ps);
+		break;
+	case WM_CLOSE:
+		DestroyWindow(hwnd);
+		break;
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		break;
+	default:
+		return DefWindowProc(hwnd, Message, wParam, lParam);
+	}
+	return 0;
+}
+LRESULT CALLBACK CmdProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	int id = GetWindowLong(hwnd, GWL_ID);
+	static HDC hdc, hdcm;
+	static BOOL bBlocking = TRUE;
+	static int cxClient, cyClient;
+	RECT rt;
+	switch (message)
+	{
+	case WM_SIZE:
+		cxClient = LOWORD(lParam);
+		cyClient = HIWORD(lParam);
+		break;
+	case WM_LBUTTONDOWN:
+		bBlocking = FALSE;
+		break;
+	case WM_LBUTTONUP:
+		bBlocking = TRUE;
+		break;
+	case WM_MOUSEMOVE:
+		if (LOWORD(lParam)>1 && HIWORD(lParam)>1
+			&& LOWORD(lParam)<cxClient && HIWORD(lParam)<cyClient)
+		{
+			if (bBlocking)
+			{
+				bBlocking = FALSE;
+				SetCursor(LoadCursor(NULL, IDC_HAND));
+				SetCapture(hwnd);
+
+				GetClientRect(hwnd, &rt);
+				HDC hdc = GetDC(hwnd);
+				SetRect(&rt, rt.left + 1, rt.top + 1, rt.right - 1, rt.bottom - 1);
+				DrawFocusRect(hdc, &rt);
+				ReleaseDC(hwnd, hdc);
+			}
+		}
+		else
+		{
+			if (!bBlocking)
+			{
+				bBlocking = TRUE;
+				ReleaseCapture();
+				SetCursor(LoadCursor(NULL, IDC_ARROW));
+
+				GetClientRect(hwnd, &rt);
+				HDC hdc = GetDC(hwnd);
+				SetRect(&rt, rt.left + 1, rt.top + 1, rt.right - 1, rt.bottom - 1);
+				DrawFocusRect(hdc, &rt);
+				ReleaseDC(hwnd, hdc);
+			}
+		}
+		break;
+	case WM_KEYDOWN:
+		if (wParam == VK_TAB)
+		{
+			SetFocus(GetDlgItem(GetParent(hwnd),
+				(id + (GetKeyState(VK_SHIFT) < 0 ? 2 : 1)) % (nButton * 2)));
+			if (id == nButton + nButton - 1)
+			{
+				SetFocus(GetParent(hwnd));
+			}
+		}
+		break;
+
+	case WM_SETFOCUS:
+		idFocus = id;
+		break;
+	default:break;
+	}
+	return CallWindowProc(CallProc[(id - bn_id) % 2][(id - bn_id) / 2], hwnd, message, wParam, lParam);
+}
+// “关于”框的消息处理程序。
+const TCHAR* tcStatus[12] =
+{ TEXT("X回零"), TEXT("Y回零"), TEXT("Z回零"), TEXT("X正极限"), TEXT("Y正极限"),
+  TEXT("Z正极限"), TEXT("X负极限"), TEXT("Y负极限"), TEXT("上刀片"), TEXT("下刀片"), TEXT("注油"), TEXT("风机") };
+
+LRESULT CALLBACK LedProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam)
+{
+	PAINTSTRUCT ps;
+	HDC hdc;
+	static RECT rect,rects[12],rect1;
+	static HBRUSH hbrush[3];
+	static COLORREF clr,color[3] = { RGB(155, 155, 155), RGB(200, 100, 100), RGB(100, 200, 100) };
+	static HPEN hpen;
+	static int i,cxClient, cyClient,n,cx,j,clrid=0;
+	static SIZE size;
+	static POINT pt;
+	static BOOL bBlocking = TRUE,bOn = TRUE;
+	static TCHAR szbuffer[120];
+	static int iblink = 0;
+	switch (Message)
+	{
+	case WM_CREATE:
+		hpen = ::CreatePen(PS_SOLID, NULL, RGB(0, 0, 128));
+		for (i = 0; i < _countof(hbrush); ++i)
+		{
+			hbrush[i] = CreateSolidBrush(color[i]);
+		}
+		bOn = bBlocking =  TRUE; 
+		iblink = 0;
+		SetTimer(hwnd, idTimer1, nTimerDelay, NULL);
+		break;
+	case WM_TIMER:
+		if (iblink-- > 0)
+		{
+			HDC hdc = GetDC(hwnd);
+			FillRect(hdc, &rects[j], (iblink % 2) ? GetStockBrush(GRAY_BRUSH): hbrush[clrid]);
+			SetTextColor(hdc, clr);
+			SelectObject(hdc, GetStockObject(ANSI_FIXED_FONT));
+			SetBkMode(hdc, TRANSPARENT);
+			DrawText(hdc, tcStatus[j], lstrlen(tcStatus[j]), &rect1, DT_BOTTOM | DT_CENTER);
+			ReleaseDC(hwnd, hdc);
+		}
+		break;
+	case WM_LBUTTONDOWN:
+		if (bOn)
+		{
+			SetCursor(LoadCursor(NULL, IDC_HAND));
+			bOn = FALSE;
+		}
+		break;
+	case WM_LBUTTONUP:
+	if(!bOn)
+	{
+
+		SetCursor(LoadCursor(NULL, IDC_ARROW));
+
+		if (iblink > 0 && (iblink % 2) )
+		{
+			HDC hdc = GetDC(hwnd);
+			FillRect(hdc, &rects[j], hbrush[clrid]);
+			SetTextColor(hdc, clr);
+			SelectObject(hdc, GetStockObject(ANSI_FIXED_FONT));
+			SetBkMode(hdc, TRANSPARENT);
+			DrawText(hdc, tcStatus[j], lstrlen(tcStatus[j]), &rect1, DT_BOTTOM | DT_CENTER);
+			ReleaseDC(hwnd, hdc);
+		}
+		rect1 = rects[j = i];
+		rect1.top = (cyClient - size.cy) / 2;
+		rect1.bottom = rect1.top + size.cy;
+
+		iblink = 6;
+		bOn = TRUE;
+	}
+		break;
+	case WM_MOUSEMOVE:
+		pt.x = LOWORD(lParam);
+		pt.y = HIWORD(lParam);
+		if (pt.x>1 && pt.y>1
+			&& pt.x<cxClient &&pt.y<cyClient)
+		{
+			if (bBlocking)
+			{
+				bBlocking = FALSE;
+				SetCapture(hwnd);
+				Static_GetText(hstu, szbuffer, 127);
+				iblink = 0;
+			}
+			if (!PtInRect(&rect, pt))
+			{
+				for (i = 0; i < n; ++i)
+				{
+					if (PtInRect(&rects[i], pt))
+					{
+						rect = rects[i];
+						Static_SetText(hstu, tcStatus[i]); 
+						break;
+					}
+				} 
+			} 
+
+		}
+		else
+		{
+			if (!bBlocking)
+			{
+				bBlocking = TRUE;
+				ReleaseCapture();
+				Static_SetText(hstu, szbuffer);
+			}
+		}
+	break;
+	case WM_SIZE:
+		cxClient = LOWORD(lParam);
+		cyClient = HIWORD(lParam);
+		break;
+	case WM_PAINT:
+			hdc = BeginPaint(hwnd, &ps);
+			rect.top = 0;
+			rect.bottom = cyClient;
+
+			n = _countof(tcStatus);
+			cx = (cxClient) / n - 1;
+
+			SelectObject(hdc, GetStockObject(ANSI_FIXED_FONT));
+			::GetTextExtentPoint32(hdc, TEXT("中文English"), lstrlen(TEXT("中文English")), &size);
+			SelectObject(hdc, hpen);
+			SetBkMode(hdc, TRANSPARENT);
+			SetTextColor(hdc, clr=RGB(236, 236, 236));
+
+			for (i = 0; i < n; ++i)
+			{
+				SetRect(&rects[i], (cx + 1)*i, 0, (cx + 1)*i + cx, cyClient);
+				if (i == n - 1)rects[i].right = cxClient;
+				FillRect(hdc, &rects[i], hbrush[clrid = 0]);
+				rect = rects[i];
+
+				rect.top = (cyClient - size.cy) / 2;
+				rect.bottom = rect.top + size.cy;
+				DrawText(hdc, tcStatus[i], lstrlen(tcStatus[i]), &rect, DT_BOTTOM | DT_CENTER);
+			}
+			EndPaint(hwnd, &ps);
+		break;
+	case WM_CLOSE:
+		DestroyWindow(hwnd);
+		break;
+	case WM_DESTROY:
+		KillTimer(hwnd, idTimer1);
+		DeleteObject(hpen);
+		for (i = 0; i < _countof(hbrush); ++i)
+		{
+			DeleteObject(hbrush[i]);
+		}
+		PostQuitMessage(0);
+		break;
+	default:
+		return DefWindowProc(hwnd, Message, wParam, lParam);
+	}
+	return 0;
+}
+LRESULT CALLBACK InfProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam)
+{
+	PAINTSTRUCT ps;
+	HDC hdc;
+	static RECT rect, rects[15];
+	static HBRUSH hbrush[3];
+	static COLORREF color[3] = { RGB(155, 155, 155), RGB(200, 100, 100), RGB(100, 200, 100) };
+	static HPEN hpen;
+	static int i, j, k,cxClient, cyClient, n, cx,cy;
+	SIZE size;
+	switch (Message)
+	{
+	case WM_CREATE:
+		/*hpen = ::CreatePen(PS_SOLID, NULL, RGB(0, 0, 128));
+		for (i = 0; i < _countof(hbrush); ++i)
+		{
+			hbrush[i] = CreateSolidBrush(color[i]);
+		}*/
+		n = 5;
+		break;
+	case WM_TIMER:
+
+		break;
+	case WM_SIZE:
+		cxClient = LOWORD(lParam);
+		cyClient = HIWORD(lParam);
+		cy = (cyClient)* 5 / 6;
+		cx = (cxClient) / n - 1;
+		cy = (cy) / 3 - 1;
+		break;
+	case WM_PAINT:
+		hdc = BeginPaint(hwnd, &ps);
+		if (pszInfo != NULL)
+		{
+			SelectObject(hdc, GetStockObject(SYSTEM_FIXED_FONT));
+			::GetTextExtentPoint32(hdc, TEXT("中文English"), lstrlen(TEXT("中文English")), &size);
+			SelectObject(hdc, hpen);
+			for (j = i = 0; i < n; ++i)
+			{
+				SetRect(&rect, (cx + 1)*i + 1, 0, (cx + 1)*i + cx, cyClient);
+				if (i == n - 1)rect.right = max(0, cxClient - 1);
+				j = i * 3;
+				rects[j + 2] = rects[j + 1] = rects[j] = rect;
+				rects[j].top = (max(0, cy - size.cy)) / 2 + cyClient / 12;
+				rects[j].bottom = rects[j].top + size.cy + 1;
+				rects[j + 1].top = rects[j].top + (cy + 1) + 1;
+				rects[j + 1].bottom = rects[j + 1].top + size.cy + 1;
+				rects[j + 2].top = rects[j].top + (cy + 1) * 2 + 1;
+				rects[j + 2].bottom = rects[j + 2].top + size.cy + 1;//FrameRect(hdc, &rects[i + 2], (HBRUSH)GetStockObject(GRAY_BRUSH));
+			}
+			SetBkMode(hdc, TRANSPARENT);
+			SetTextColor(hdc, RGB(0, 0, 236));
+
+			for (k = i = 0; i < 5; ++i, k)
+			{
+				for (j = 0; j < 3; ++j)
+				{
+					DrawText(hdc, pszInfo[j][i], lstrlen(pszInfo[j][i]), &rects[k++], DT_BOTTOM | DT_CENTER);
+				}
+			}
+		}
+		EndPaint(hwnd, &ps);
+		break;
+	case WM_CLOSE:
+		DestroyWindow(hwnd);
+		break;
+	case WM_DESTROY:
+		/*DeleteObject(hpen);
+		for (i = 0; i < _countof(hbrush); ++i)
+		{
+			DeleteObject(hbrush[i]);
+		}*/
+		PostQuitMessage(0);
+		break;
+	default:
+		return DefWindowProc(hwnd, Message, wParam, lParam);
+	}
+	return 0;
+}
+INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	switch (message)
+	{
+	case WM_INITDIALOG:
+		return (INT_PTR)TRUE;
+
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+		{
+			EndDialog(hDlg, LOWORD(wParam));
+			return (INT_PTR)TRUE;
+		}
+		break;
+	}
+	return (INT_PTR)FALSE;
+}
+typedef struct
+{
+	TCHAR szCommand[64];
+	TCHAR szItemName[64];
+} DMC_COMMAND_INFO;
+#define N_CMD_INFO 20
+static DMC_COMMAND_INFO DMC_CMD_INFO[25] = 
+{
+	   TEXT("TB"), TEXT("0.状态")\
+	 , TEXT("TD"), TEXT("1.发送脉冲位置")\
+	 , TEXT("TE"), TEXT("2.位置误差")\
+	 , TEXT("TI"), TEXT("3.通用输入点状态")\
+	 , TEXT("TP"), TEXT("4.主编码器位置")\
+	 , TEXT("TR"), TEXT("5.轨迹")\
+	 , TEXT("TS"), TEXT("6.轴状态")\
+	 , TEXT("TV"), TEXT("7.速度值(编码器反馈)")\
+	 , TEXT("TPA"), TEXT("8.A轴编码器反馈")\
+	 , TEXT("TPB"), TEXT("9.B轴编码器反馈")\
+	 , TEXT("TPC"), TEXT("10.C轴编码器反馈")\
+	 , TEXT("TPD"), TEXT("11.D轴编码器反馈")\
+	 , TEXT("PR?"), TEXT("12.A轴位置")\
+	 , TEXT("PR,?"), TEXT("13.B轴位置")\
+	 , TEXT("PR,,?"), TEXT("14.C轴位置")\
+	 , TEXT("PR,,,?"), TEXT("15.D轴位置")\
+	 , TEXT("^R^V"), TEXT("16.控制器固件版本")\
+	 , TEXT("RP"), TEXT("17.参考位置")\
+	 , TEXT("RL"), TEXT("18.所存位置")\
+	 , TEXT("TC"), TEXT("19.错误信息码")\
+	 , TEXT(""), TEXT("20.")
+};
+INT_PTR CALLBACK DMCInfoDlg(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	static HWND hwnd_query, hwnd_result,hwnd;
+	static DLG_DATA_DMC_INFO _dmc_info, *_pdmc_info;
+	static int cy;
+	static SIZE size;
+	static RECT rect;
+	static int i = 0,j=0;
+	static BOOL bNoSel = TRUE;
+	switch (message)
+	{
+	case WM_CTLCOLORSTATIC:
+		SetTextColor((HDC)wParam, RGB(20, 0, 0));
+		SetBkColor((HDC)wParam, GetSysColor(COLOR_BTNHIGHLIGHT));
+		break;
+	case WM_INITDIALOG:
+		_pdmc_info = (DLG_DATA_DMC_INFO*)lParam;
+		if (_pdmc_info != NULL)
+		{
+			memcpy_s(&_dmc_info, sizeof(DLG_DATA_DMC_INFO), _pdmc_info, sizeof(DLG_DATA_DMC_INFO));
+
+		}
+		hwnd_query = GetDlgItem(hDlg, IDC_LIST2);
+		hwnd_result = GetDlgItem(hDlg, IDC_LIST1);
+
+		size.cx = LOWORD(GetDialogBaseUnits());
+		size.cy = HIWORD(GetDialogBaseUnits());
+
+		::SendMessage(hwnd_query, WM_SETREDRAW, FALSE, 0);
+		for (i = 0; i < N_CMD_INFO; ++i)
+		{
+			ListBox_InsertString(hwnd_query, i, DMC_CMD_INFO[i].szItemName);
+			ListBox_SetItemData(hwnd_query, i, DMC_CMD_INFO[i].szCommand);
+			ListBox_SetItemHeight(hwnd_query, i, size.cy+2);
+		}
+		i = 0;
+		::SendMessage(hwnd_query, LB_SETSEL, TRUE, 0);
+		::SendMessage(hwnd_query, LB_SETSEL, TRUE, 1);
+		::SendMessage(hwnd_query, LB_SETSEL, TRUE, 16);
+		::SendMessage(hwnd_query, LB_SETSEL, TRUE, 19);
+		::SendMessage(hwnd_query, WM_SETREDRAW, TRUE, 0);
+	
+		return (INT_PTR)TRUE;
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+		{
+			DestroyWindow(hDlg);
+			hmodel = NULL;
+			return (INT_PTR)TRUE;
+		}
+		else if (LOWORD(wParam) == ID_QUERY)
+		{
+			ListBox_ResetContent(hwnd_result);
+#ifdef _DEBUG
+			//::SendMessage(hwnd_result, WM_SETREDRAW, FALSE, 0);
+			SetCursor(LoadCursor(NULL, IDC_WAIT));
+			ShowCursor(TRUE);
+
+			for (i = j = 0; i < N_CMD_INFO; ++i)
+			{
+				if (::SendMessage(hwnd_query, LB_GETSEL, i, 0))
+				{
+					_bstr_t _bs(TEXT(" - "));
+					_bs = TEXT(":") + _bs;
+					_bs = DMC_CMD_INFO[i].szItemName + _bs;
+					ListBox_InsertString(hwnd_result, j, _bs);
+				    ListBox_SetItemHeight(hwnd_result,j++, size.cy + 2);
+					Sleep(100);
+				}
+			}
+			ShowCursor(FALSE);
+			SetCursor(LoadCursor(NULL, IDC_ARROW));
+			//::SendMessage(hwnd_result, WM_SETREDRAW, TRUE, 0);
+#else
+if (dmc_param.blink && pIGalil != NULL)
+{
+	//::SendMessage(hwnd_result, WM_SETREDRAW, FALSE, 0);
+	SetCursor(LoadCursor(NULL, IDC_WAIT));
+	ShowCursor(TRUE);
+
+	for (i =j= 0; i < N_CMD_INFO; ++i)
+	{
+		if (::SendMessage(hwnd_query, LB_GETSEL, i, 0))
+		{
+			_bstr_t _bs = pIGalil->command(DMC_CMD_INFO[i].szCommand, TEXT("\r"), TEXT(":"), TRUE);
+			_bs = TEXT(":") + _bs;
+			_bs = DMC_CMD_INFO[i].szItemName + _bs;
+			ListBox_InsertString(hwnd_result, j, _bs);
+			ListBox_SetItemHeight(hwnd_result,j++, size.cy + 2);
+		}
+	}
+	ShowCursor(FALSE);
+	SetCursor(LoadCursor(NULL, IDC_ARROW));
+	//::SendMessage(hwnd_result, WM_SETREDRAW, TRUE, 0);
+}
+#endif
+		}
+		else if (LOWORD(wParam) == IDC_LIST2 && HIWORD(wParam)==LBN_DBLCLK)
+		{
+#ifdef _DEBUG
+			//ListBox_ResetContent(hwnd_result);
+			::SendMessage(hwnd_query, LB_SETSEL, bNoSel = !bNoSel, -1);
+			hwnd = (HWND)lParam;
+#endif
+		}
+		else if (LOWORD(wParam) == IDC_LIST1 && HIWORD(wParam) == LBN_SELCHANGE)
+		{
+			i = ListBox_GetCurSel(hwnd_result);
+			int nlen = ListBox_GetTextLen(hwnd_result, i);
+			TCHAR* psz = (TCHAR*)malloc(sizeof(TCHAR)*(nlen + 1));
+			ListBox_GetText(hwnd_result, i, psz);
+			Static_SetText(GetDlgItem(hDlg, IDC_STC_INFO), psz);
+			free(psz);
+		}
+		break;
+	case WM_CLOSE:
+			DestroyWindow(hDlg);
+			hmodel = NULL;
+		break;
+	}
+	return (INT_PTR)FALSE;
+}
+/*
+ 控制器相关函数
+*/
+int _OpenFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave)
+{
+	if (bsave && IDCANCEL == AskAboutSave(hwnd, szTitleName))
+		return 0;
+
+	if (PopFileOpenDlg(hwnd, szFileName, szTitleName))
+	{
+		if (!PopFileRead(hcmd, szFileName))
+		{
+			WindowOK(hwnd, TEXT("读取文件 %s 失败!"), szTitleName);
+			szFileName[0] = '\0';
+			szTitleName[0] = '\0';
+			return FALSE;
+		}
+	}
+
+	DoCaption(hwnd, szTitleName);
+	DoCaption(hstu, szFileName);
+	bsave = FALSE;
+	return TRUE;
+}
+int _DownLoadFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave)
+{
+	SetFilter(TEXT("DMC Files (*.dmc)\0*.dmc\0"));
+	if (_OpenFile(hwnd, hcmd, hstu, bsave))
+	{
+#ifdef _DEBUG  
+		//Edit_SetLineText(hmsg, TEXT("command."));
+		return TRUE;
+#else
+		if (dmc_param.blink && pIGalil != NULL)
+		{
+			return (S_OK == pIGalil->programDownloadFile(szFileName));
+		}
+#endif 
+	}
+	else
+	{
+		return FALSE;
+	}
+}
+int _UpLoadFile(HWND hwnd, HWND hcmd, HWND hstu, BOOL bsave)
+{
+#ifdef _DEBUG  
+	//Edit_SetLineText(hmsg, TEXT("command."));
+	return TRUE;
+#else
+	if (dmc_param.blink && pIGalil != NULL)
+	{
+		Edit_SetText(hcmd, pIGalil->programUpload());
+	}
+#endif 
+}
+int _DownloadExcute(TCHAR* szSend, HWND hmsg)
+{
+
+#ifdef _DEBUG
+	TCHAR* p = szSend, *q;
+	q = p;
+	while (*p != L'\0')
+	{
+		if (*p != L'r' && *p != L'n')
+		{
+			if (p - q >1)
+			{
+				*++q = *p;
+			}
+			++q;
+		}
+		else
+		{
+			if (*p == L'n')
+			{
+				*p = L'r';
+			}
+		}
+		++p;
+	}
+	if (*q != L'\0')
+	{
+		*++q = L'\0';
+	}
+	Edit_SetLineText(hmsg, szSend);
+#else
+	pIGalil->programDownload(szSend);
+	Edit_SetLineText(hmsg, TEXT("反馈信息：") + pIGalil->command(TEXT("XQ"), TEXT("\r"), TEXT(":"), TRUE));
+#endif
+	return 1;
+}
+int _SendDMC(TCHAR* szSend, HWND hmsg)
+{
+	TCHAR* p = szSend, *q = szSend;
+	while (*p != L'\0')
+	{
+		q = p;
+		while (*p != L'\0'&&*p != L'\r'&&*p != L'\n')++p;
+		if (*p != '\0')
+		{
+			if (*p == L'\r'&&*(p + 1) == L'\n')
+			{
+				*p++ = L'\0';
+				*p = L'\0';
+			}
+			if (*p == L'\n'&&*(p + 1) == L'\r')
+			{
+				*p++ = L'\0';
+				*p = L'\0';
+			}
+			++p;
+		}
+		Edit_SetLineText(hmsg, q);
+#ifdef _DEBUG
+
+#else
+		Edit_SetLineText(hmsg, TEXT("反馈信息：") + pIGalil->command(_bstr_t(q), TEXT("\r"), TEXT(":"), TRUE));
+#endif
+	}
+	return 1;
+}
